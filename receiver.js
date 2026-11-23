@@ -1,18 +1,25 @@
 /*
- * receiver.js - RECEIVER side of the flowchart
+ * receiver.js - RECEIVER side of the secure image flow
  *
- * Run FIRST:
+ * Run first:
  *   node receiver.js
  *
- * Then:
+ * Sender:
  *   node sender.js photo.png
  *
  * Options:
  *   --port=5000
+ *   --host=127.0.0.1
  *   --key=<64 hex>
  *   --once
- *   --host=0.0.0.0
+ *
+ * Security additions:
+ *   - HMAC-SHA-256 authenticates the complete canonical manifest.
+ *   - Unique package IDs are recorded persistently to reject replayed packages.
+ *   - ZIP structure, entry sizes, names and local/central headers are checked.
+ *   - Incoming TCP message length and buffering are bounded.
  */
+
 "use strict";
 
 const path = require("path");
@@ -20,41 +27,56 @@ const net = require("net");
 const C = require("./common.js");
 const fs = require("fs");
 
-const out = path.join("runtime_output", "receiver");
+// ============================================================================
+// CONFIGURATION
+// ============================================================================
+
+const out = path.join(
+  "runtime_output",
+  "receiver"
+);
+
+const replayFile = path.join(
+  out,
+  "accepted_package_ids.txt"
+);
 
 const opt = {
   port: 5000,
-  host: "0.0.0.0",
+  host: "127.0.0.1",
   key: null,
   once: false
 };
 
 for (const s of process.argv.slice(2)) {
-
   if (s.startsWith("--port=")) {
     opt.port = Number(s.slice(7));
-  }
-
-  else if (s.startsWith("--host=")) {
+  } else if (s.startsWith("--host=")) {
     opt.host = s.slice(7);
-  }
-
-  else if (s.startsWith("--key=")) {
+  } else if (s.startsWith("--key=")) {
     opt.key = s.slice(6);
-  }
-
-  else if (s === "--once") {
+  } else if (s === "--once") {
     opt.once = true;
   }
 }
 
-class StageError extends Error {
+if (
+  !Number.isInteger(opt.port) ||
+  opt.port < 1 ||
+  opt.port > 65535
+) {
+  throw new Error("Invalid --port");
+}
 
+// ============================================================================
+// ERROR HANDLING
+// ============================================================================
+
+class StageError extends Error {
   constructor(stage, message) {
     super(message);
     this.stage = stage;
   }
-
 }
 
 const fail = (stage, message) => {
@@ -67,13 +89,65 @@ const isHex = (s, n) =>
 
 const log = (...a) => console.log(...a);
 
+// ============================================================================
+// REPLAY PROTECTION
+// ============================================================================
+
+function hasBeenAccepted(packageId) {
+  if (!fs.existsSync(replayFile)) {
+    return false;
+  }
+
+  const text = fs.readFileSync(
+    replayFile,
+    "utf8"
+  );
+
+  if (text && !text.endsWith("\n")) {
+    fail(
+      "replay-store",
+      "Replay database has an incomplete final record; refusing to continue safely"
+    );
+  }
+
+  const lines = text
+    .split("\n")
+    .filter(Boolean);
+
+  for (const id of lines) {
+    if (!isHex(id, 32)) {
+      fail(
+        "replay-store",
+        "Replay database contains an invalid record"
+      );
+    }
+  }
+
+  return lines.includes(packageId);
+}
+
+function recordAccepted(packageId) {
+  fs.appendFileSync(
+    replayFile,
+    packageId + "\n",
+    {
+      encoding: "utf8",
+      flag: "a"
+    }
+  );
+}
+
+// ============================================================================
+// PACKAGE PROCESSING
+// ============================================================================
 
 function processPackage(zipBytes) {
-
   const checks = {};
 
+  // --------------------------------------------------------------------------
+  // ZIP VALIDATION
+  // --------------------------------------------------------------------------
 
-  // STAGE 1: ZIP validation
   let files;
 
   try {
@@ -82,39 +156,66 @@ function processPackage(zipBytes) {
     fail("zip", e.message);
   }
 
-  const names = Object.keys(files).sort().join(",");
+  const names = Object.keys(files)
+    .sort()
+    .join(",");
 
-  if (names !== "manifest.json,share_1.enc,share_2.enc") {
-    fail("zip", "Unexpected ZIP contents: " + names);
+  if (
+    names !==
+    "manifest.json,share_1.enc,share_2.enc"
+  ) {
+    fail(
+      "zip",
+      "Unexpected ZIP contents: " + names
+    );
   }
 
   checks.zip = true;
 
   log(
-    "  ZIP contents correct."
+    "  ZIP structure, names, CRCs and bounds verified."
   );
 
+  // --------------------------------------------------------------------------
+  // MANIFEST PARSING
+  // --------------------------------------------------------------------------
 
-  // STAGE 2: Manifest validation
+  if (
+    files["manifest.json"].length >
+    64 * 1024
+  ) {
+    fail(
+      "manifest",
+      "Manifest exceeds 64 KiB"
+    );
+  }
+
   let mf;
 
   try {
     mf = JSON.parse(
       files["manifest.json"].toString("utf8")
     );
-  } catch (e) {
-    fail("manifest", "manifest.json is not valid JSON");
+  } catch (_) {
+    fail(
+      "manifest",
+      "manifest.json is not valid JSON"
+    );
   }
 
-  const okInt = (v) =>
-    Number.isInteger(v) &&
+  // --------------------------------------------------------------------------
+  // MANIFEST FIELD VALIDATION
+  // --------------------------------------------------------------------------
+
+  const okInt = (v, max) =>
+    Number.isSafeInteger(v) &&
     v > 0 &&
-    v <= 20000;
+    v <= max;
 
   if (
     !mf ||
     mf.format !== "VCX-FLOW" ||
-    mf.version !== 1
+    mf.version !== 2
   ) {
     fail(
       "manifest",
@@ -122,32 +223,57 @@ function processPackage(zipBytes) {
     );
   }
 
+  if (!isHex(mf.package_id, 32)) {
+    fail(
+      "manifest",
+      "Invalid package ID"
+    );
+  }
+
   if (
-    !okInt(mf.width) ||
-    !okInt(mf.height) ||
+    typeof mf.created_at !== "string" ||
+    Number.isNaN(Date.parse(mf.created_at))
+  ) {
+    fail(
+      "manifest",
+      "Invalid package creation time"
+    );
+  }
+
+  if (
+    !okInt(mf.width, 20000) ||
+    !okInt(mf.height, 20000) ||
     mf.channels !== 3
   ) {
     fail(
       "manifest",
-      "Invalid image dimensions"
+      "Invalid image dimensions or channel count"
     );
   }
 
-  const rgbLen = mf.width * mf.height * 3;
+  const pixelCount =
+    mf.width * mf.height;
+
+  const rgbLen =
+    pixelCount * 3;
 
   if (
+    !Number.isSafeInteger(rgbLen) ||
     rgbLen > C.MAX_PACKAGE ||
     mf.original_size !== rgbLen
   ) {
     fail(
       "manifest",
-      "Image size in manifest does not match dimensions"
+      "Image size in manifest does not match dimensions or exceeds limits"
     );
   }
 
   if (
     typeof mf.original_filename !== "string" ||
-    mf.original_filename.length > 255
+    mf.original_filename.length < 1 ||
+    mf.original_filename.length > 255 ||
+    path.basename(mf.original_filename) !== mf.original_filename ||
+    /[\\/\0]/.test(mf.original_filename)
   ) {
     fail(
       "manifest",
@@ -164,12 +290,26 @@ function processPackage(zipBytes) {
   ) {
     fail(
       "manifest",
-      "Invalid hex field in manifest"
+      "Invalid hexadecimal field in manifest"
     );
   }
 
+  if (
+    mf.key_derivation !== "HKDF-SHA-256" ||
+    mf.manifest_authentication !== "HMAC-SHA-256" ||
+    mf.encryption !== "AES-256-GCM" ||
+    mf.sharing !== "XOR-2-out-of-2"
+  ) {
+    fail(
+      "manifest",
+      "Unsupported cryptographic configuration"
+    );
+  }
 
-  // NEW: Validate means of both shares
+  // --------------------------------------------------------------------------
+  // RGB MEANS VALIDATION
+  // --------------------------------------------------------------------------
+
   if (
     !mf.share_means ||
     !Array.isArray(mf.share_means.share_1) ||
@@ -179,14 +319,14 @@ function processPackage(zipBytes) {
   ) {
     fail(
       "manifest",
-      "Invalid RGB means for the two shares"
+      "Invalid RGB means for the shares"
     );
   }
 
-  for (const share of ["share_1", "share_2"]) {
-
+  for (
+    const share of ["share_1", "share_2"]
+  ) {
     for (const value of mf.share_means[share]) {
-
       if (
         typeof value !== "string" ||
         !/^\d+(\.\d{4})$/.test(value) ||
@@ -195,28 +335,45 @@ function processPackage(zipBytes) {
       ) {
         fail(
           "manifest",
-          `Invalid RGB mean value in ${share}`
+          `Invalid RGB mean in ${share}`
         );
       }
-
     }
-
   }
 
+  // --------------------------------------------------------------------------
+  // RANDOM SELECTION VALIDATION
+  // --------------------------------------------------------------------------
 
   if (
     !mf.selection ||
-    typeof mf.selection !== "object"
+    !Array.isArray(mf.selection.order) ||
+    mf.selection.order.length !== 3 ||
+    !Array.isArray(mf.selection.picks) ||
+    mf.selection.picks.length !== 3 ||
+    [...mf.selection.order].sort().join(",") !== "0,1,2" ||
+    !mf.selection.picks.every(
+      (v) =>
+        Number.isInteger(v) &&
+        v >= 0 &&
+        v <= 255
+    )
   ) {
     fail(
       "manifest",
-      "Invalid selection"
+      "Invalid random selection values"
     );
   }
 
+  // --------------------------------------------------------------------------
+  // ENCRYPTED SHARE SIZE VALIDATION
+  // --------------------------------------------------------------------------
+
   if (
-    files["share_1.enc"].length !== rgbLen + 16 ||
-    files["share_2.enc"].length !== rgbLen + 16
+    !Number.isSafeInteger(mf.share_size) ||
+    mf.share_size !== rgbLen + 16 ||
+    files["share_1.enc"].length !== mf.share_size ||
+    files["share_2.enc"].length !== mf.share_size
   ) {
     fail(
       "manifest",
@@ -227,11 +384,72 @@ function processPackage(zipBytes) {
   checks.manifest = true;
 
   log(
-    `  Manifest valid: ${mf.width} x ${mf.height}`
+    `  Manifest fields valid: ${mf.width} x ${mf.height}; package ${mf.package_id}.`
   );
 
+  // --------------------------------------------------------------------------
+  // LOAD MASTER SECRET
+  // --------------------------------------------------------------------------
 
-  // STAGE 3: Dynamic SHA-256 digest verification
+  let master;
+  let where;
+
+  try {
+    ({
+      master,
+      where
+    } = C.loadMaster(opt.key, false));
+  } catch (e) {
+    fail("key", e.message);
+  }
+
+  const salt = Buffer.from(
+    mf.hkdf_salt,
+    "hex"
+  );
+
+  // --------------------------------------------------------------------------
+  // MANIFEST HMAC VERIFICATION
+  // --------------------------------------------------------------------------
+
+  if (
+    !C.verifyManifestMac(
+      master,
+      salt,
+      mf
+    )
+  ) {
+    fail(
+      "manifest-hmac",
+      "Manifest HMAC is invalid; manifest may have been modified or the key is incorrect"
+    );
+  }
+
+  checks.manifest_hmac = true;
+
+  log(
+    "  Manifest HMAC-SHA-256 verified."
+  );
+
+  // --------------------------------------------------------------------------
+  // REPLAY CHECK
+  // --------------------------------------------------------------------------
+
+  if (
+    hasBeenAccepted(mf.package_id)
+  ) {
+    fail(
+      "replay",
+      "This authenticated package ID has already been accepted"
+    );
+  }
+
+  checks.replay_protection = true;
+
+  // --------------------------------------------------------------------------
+  // DYNAMIC SHA-256 VERIFICATION
+  // --------------------------------------------------------------------------
+
   const digest = C.dynamicDigest(
     mf.share_means,
     mf.selection,
@@ -239,10 +457,9 @@ function processPackage(zipBytes) {
   );
 
   if (digest !== mf.dynamic_digest) {
-
     fail(
       "digest",
-      "Dynamic SHA-256 digest does not match the manifest"
+      "Dynamic SHA-256 digest does not match the authenticated manifest"
     );
   }
 
@@ -253,16 +470,13 @@ function processPackage(zipBytes) {
     digest
   );
 
-
-  // STAGE 4: Master secret + HKDF
-  const { master, where } = C.loadMaster(
-    opt.key,
-    false
-  );
+  // --------------------------------------------------------------------------
+  // HKDF KEY DERIVATION
+  // --------------------------------------------------------------------------
 
   const k = C.deriveKeys(
     master,
-    Buffer.from(mf.hkdf_salt, "hex"),
+    salt,
     mf.dynamic_digest
   );
 
@@ -270,12 +484,14 @@ function processPackage(zipBytes) {
     `  Master secret loaded from ${where}; HKDF-SHA-256 keys derived.`
   );
 
+  // --------------------------------------------------------------------------
+  // AES-256-GCM DECRYPTION
+  // --------------------------------------------------------------------------
 
-  // STAGE 5: AES-256-GCM decryption
-  let d1, d2;
+  let d1;
+  let d2;
 
   try {
-
     d1 = C.aesDecrypt(
       k.key1,
       k.nonce1,
@@ -287,19 +503,14 @@ function processPackage(zipBytes) {
       ),
       files["share_1.enc"]
     );
-
-  } catch (e) {
-
+  } catch (_) {
     fail(
       "aes-gcm",
-      "Share 1 authentication tag invalid"
+      "Share 1 AES-GCM authentication failed"
     );
-
   }
 
-
   try {
-
     d2 = C.aesDecrypt(
       k.key2,
       k.nonce2,
@@ -311,16 +522,12 @@ function processPackage(zipBytes) {
       ),
       files["share_2.enc"]
     );
-
-  } catch (e) {
-
+  } catch (_) {
     fail(
       "aes-gcm",
-      "Share 2 authentication tag invalid"
+      "Share 2 AES-GCM authentication failed"
     );
-
   }
-
 
   if (
     d1.length !== rgbLen ||
@@ -338,8 +545,89 @@ function processPackage(zipBytes) {
     "  AES-256-GCM tags valid for both shares."
   );
 
+  // --------------------------------------------------------------------------
+  // RGB MEAN VERIFICATION
+  // --------------------------------------------------------------------------
 
-  // Save decrypted shares
+  const receivedMeans1 = C.rgbMeans(d1);
+  const receivedMeans2 = C.rgbMeans(d2);
+
+  const share1Match =
+    receivedMeans1.join() ===
+    mf.share_means.share_1.join();
+
+  const share2Match =
+    receivedMeans2.join() ===
+    mf.share_means.share_2.join();
+
+  if (!share1Match || !share2Match) {
+    fail(
+      "share-means",
+      "RGB means of decrypted shares do not match the authenticated manifest"
+    );
+  }
+
+  checks.share_mean_verification = true;
+
+  log(
+    "  Share 1 and Share 2 RGB means: MATCH."
+  );
+
+  // --------------------------------------------------------------------------
+  // XOR IMAGE RECONSTRUCTION
+  // --------------------------------------------------------------------------
+
+  const rec = C.xorStack(
+    new Uint8Array(d1),
+    new Uint8Array(d2)
+  );
+
+  // --------------------------------------------------------------------------
+  // ORIGINAL SHA-256 VERIFICATION
+  // --------------------------------------------------------------------------
+
+  const recSha = C.sha256Hex(rec);
+  const recMd5 = C.md5Hex(rec);
+
+  if (recSha !== mf.original_sha256) {
+    fail(
+      "sha256",
+      "SHA-256 of the reconstructed image differs from the authenticated original hash"
+    );
+  }
+
+  checks.sha256 = true;
+
+  log(
+    "  Reconstructed image SHA-256 matches:",
+    recSha
+  );
+
+  log(
+    "  Reconstructed image MD5:",
+    recMd5,
+    recMd5 === mf.original_md5
+      ? "(matches)"
+      : "(different; informational only)"
+  );
+
+  // --------------------------------------------------------------------------
+  // SAVE ACCEPTED PACKAGE ID
+  // --------------------------------------------------------------------------
+
+  try {
+    recordAccepted(mf.package_id);
+  } catch (e) {
+    fail(
+      "replay-store",
+      "Could not persist accepted package ID: " + e.message
+    );
+  }
+
+  // --------------------------------------------------------------------------
+  // SAVE RECONSTRUCTED FILES
+  // --------------------------------------------------------------------------
+
   fs.writeFileSync(
     path.join(out, "decrypted_share_1.png"),
     C.encodePng(
@@ -358,59 +646,6 @@ function processPackage(zipBytes) {
     )
   );
 
-
-  // STAGE 6: Calculate RGB means of decrypted Share 1 and Share 2
-  const receivedMeans1 = C.rgbMeans(d1);
-  const receivedMeans2 = C.rgbMeans(d2);
-
-  log("\n  DECRYPTED SHARE MEAN VERIFICATION");
-
-  log("\n  SHARE 1");
-  log(
-    `  R=${receivedMeans1[0]} G=${receivedMeans1[1]} B=${receivedMeans1[2]}`
-  );
-
-  log("\n  SHARE 2");
-  log(
-    `  R=${receivedMeans2[0]} G=${receivedMeans2[1]} B=${receivedMeans2[2]}`
-  );
-
-
-  // Compare calculated means with sender's manifest
-  const share1Match =
-    receivedMeans1.join() ===
-    mf.share_means.share_1.join();
-
-  const share2Match =
-    receivedMeans2.join() ===
-    mf.share_means.share_2.join();
-
-  if (!share1Match || !share2Match) {
-
-    fail(
-      "share-means",
-      "RGB means of decrypted shares do not match the sender's manifest"
-    );
-
-  }
-
-  checks.share_mean_verification = true;
-
-  log(
-    "  Share 1 RGB means: MATCH"
-  );
-
-  log(
-    "  Share 2 RGB means: MATCH"
-  );
-
-
-  // STAGE 7: Reconstruct original image
-  const rec = C.xorStack(
-    new Uint8Array(d1),
-    new Uint8Array(d2)
-  );
-
   fs.writeFileSync(
     path.join(out, "reconstructed_image.png"),
     C.encodePng(
@@ -420,40 +655,16 @@ function processPackage(zipBytes) {
     )
   );
 
+  // --------------------------------------------------------------------------
+  // VERIFICATION REPORT
+  // --------------------------------------------------------------------------
 
-  // STAGE 8: Original image SHA-256 verification
-  const recSha = C.sha256Hex(rec);
-  const recMd5 = C.md5Hex(rec);
-
-  if (recSha !== mf.original_sha256) {
-
-    fail(
-      "sha256",
-      "SHA-256 of the rebuilt image differs from the original"
-    );
-
-  }
-
-  checks.sha256 = true;
-
-  log(
-    "  SHA-256 of rebuilt image matches the original:",
-    recSha
-  );
-
-  log(
-    "  MD5 of rebuilt image:",
-    recMd5,
-    recMd5 === mf.original_md5 ? "(matches)" : "(DIFFERENT)"
-  );
-
-
-  // STAGE 9: Verification report
   const report = {
-
     status: "SUCCESS",
 
     checks,
+
+    package_id: mf.package_id,
 
     original_filename: mf.original_filename,
 
@@ -475,15 +686,11 @@ function processPackage(zipBytes) {
     },
 
     original_sha256: mf.original_sha256,
-
     reconstructed_sha256: recSha,
-
     reconstructed_md5: recMd5,
 
     md5_match: recMd5 === mf.original_md5
-
   };
-
 
   fs.writeFileSync(
     path.join(out, "verification_report.json"),
@@ -493,134 +700,148 @@ function processPackage(zipBytes) {
   return report;
 }
 
+// ============================================================================
+// SEND RESPONSE TO SENDER
+// ============================================================================
 
-// Send response to sender
 const send = (sock, obj) =>
-  new Promise((r) =>
-    sock.write(
-      C.lengthPrefix(
-        Buffer.from(JSON.stringify(obj))
-      ),
-      r
-    )
-  );
+  new Promise((resolve, reject) => {
+    const bytes = C.lengthPrefix(
+      Buffer.from(
+        JSON.stringify(obj),
+        "utf8"
+      )
+    );
 
+    sock.write(bytes, (err) => {
+      if (err) reject(err);
+      else resolve();
+    });
+  });
 
-fs.mkdirSync(out, { recursive: true });
+// ============================================================================
+// START RECEIVER SERVER
+// ============================================================================
 
-try {
-  C.loadMaster(opt.key, false);
-} catch (e) {
-  // Sender may create master.key later
-}
+fs.mkdirSync(
+  out,
+  { recursive: true }
+);
+
+// The receiver does not automatically create a master key.
+// Sender and receiver must share the same secret.
 
 let busy = false;
 
-const server = net.createServer(async (sock) => {
+const server = net.createServer(
+  async (sock) => {
+    sock.setTimeout(
+      60000,
+      () => sock.destroy()
+    );
 
-  sock.setTimeout(60000, () => sock.destroy());
+    sock.on("error", () => {});
 
-  sock.on("error", () => {});
+    if (busy) {
+      try {
+        await send(sock, {
+          status: "FAILURE",
+          stage: "busy",
+          message: "receiver is busy",
+          checks: {}
+        });
+      } catch (_) {}
 
-  if (busy) {
+      sock.end();
+      return;
+    }
 
-    await send(sock, {
-      status: "FAILURE",
-      stage: "busy",
-      message: "receiver is busy",
-      checks: {}
-    });
+    busy = true;
+
+    const reader = new C.Reader(
+      sock,
+      C.MAX_PACKAGE + 8
+    );
+
+    let reply;
+
+    try {
+      log(
+        "\n" +
+        "=".repeat(70) +
+        "\nRECEIVER: connection from " +
+        sock.remoteAddress
+      );
+
+      // Read 8-byte package length
+      const lenBig = (
+        await reader.take(8)
+      ).readBigUInt64BE();
+
+      if (
+        lenBig <= 0n ||
+        lenBig > BigInt(C.MAX_PACKAGE)
+      ) {
+        fail(
+          "length",
+          "Invalid package length: " +
+          lenBig.toString()
+        );
+      }
+
+      const len = Number(lenBig);
+
+      log(
+        "STAGE 1  Package length:",
+        len,
+        "bytes"
+      );
+
+      // Read complete ZIP package
+      const pkg = await reader.take(len);
+
+      log(
+        "STAGE 2  Package received completely."
+      );
+
+      // Process and verify package
+      reply = processPackage(pkg);
+
+      log(
+        "RESULT   SUCCESS: package accepted. Files saved in",
+        out
+      );
+    } catch (e) {
+      log(
+        `RESULT   REJECTED at "${e.stage || "network"}": ${e.message}`
+      );
+
+      reply = {
+        status: "FAILURE",
+        stage: e.stage || "network",
+        message: e.message,
+        checks: {}
+      };
+    }
+
+    // Send result to sender
+    try {
+      await send(sock, reply);
+    } catch (_) {}
 
     sock.end();
 
-    return;
-  }
+    busy = false;
 
-  busy = true;
-
-  const reader = new C.Reader(sock);
-
-  let reply;
-
-  try {
-
-    log(
-      "\n" +
-      "=".repeat(70) +
-      "\nRECEIVER: connection from " +
-      sock.remoteAddress
-    );
-
-
-    // STAGE 1: Read package length
-    const len = Number(
-      (await reader.take(8)).readBigUInt64BE()
-    );
-
-    if (!(len > 0 && len <= C.MAX_PACKAGE)) {
-
-      fail(
-        "length",
-        "Invalid package length: " + len
-      );
-
+    if (opt.once) {
+      server.close();
     }
-
-    log(
-      "STAGE 1  Package length:",
-      len,
-      "bytes"
-    );
-
-
-    // STAGE 2: Receive package
-    const pkg = await reader.take(len);
-
-    log(
-      "STAGE 2  Package received completely."
-    );
-
-
-    // Process package
-    reply = processPackage(pkg);
-
-    log(
-      "RESULT   SUCCESS: package accepted. Files saved in",
-      out
-    );
-
-  } catch (e) {
-
-    log(
-      `RESULT   REJECTED at "${e.stage || "network"}": ${e.message}`
-    );
-
-    reply = {
-      status: "FAILURE",
-      stage: e.stage || "network",
-      message: e.message,
-      checks: {}
-    };
-
   }
+);
 
-
-  try {
-    await send(sock, reply);
-  } catch (e) {
-    // Sender disconnected
-  }
-
-  sock.end();
-
-  busy = false;
-
-  if (opt.once) {
-    server.close();
-  }
-
-});
-
+// ============================================================================
+// LISTEN
+// ============================================================================
 
 server.listen(
   opt.port,
@@ -629,16 +850,18 @@ server.listen(
     console.log(
       `RECEIVER listening on ${opt.host}:${opt.port} (press Ctrl+C to stop)`
     );
+
+    console.log(
+      `Replay database: ${replayFile}`
+    );
   }
 );
 
 server.on("error", (e) => {
-
   console.error(
     "RECEIVER ERROR:",
     e.message
   );
 
   process.exit(1);
-
 });

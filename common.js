@@ -1,16 +1,11 @@
 /*
  * common.js - shared tools for sender.js and receiver.js
  *
- * Hashes written from scratch:
- * MD5, SHA-256, HMAC-SHA-256, HKDF-SHA-256
- *
- * AES-256-GCM: Node.js built-in crypto
- * PNG / BMP reading, PNG writing, XOR secret sharing,
- * ZIP writer/reader, TCP message reader.
- *
+ * Hashes written from scratch: MD5, SHA-256, HMAC-SHA-256, HKDF-SHA-256
+ * AES-256-GCM: Node's built-in crypto
+ * PNG / BMP reading, PNG writing, XOR secret sharing, ZIP writer/reader, TCP reader
  * JPG files require: npm install jpeg-js
  */
-
 "use strict";
 
 const fs = require("fs");
@@ -23,36 +18,25 @@ const crypto = require("crypto");
 
 const rotl = (x, n) => ((x << n) | (x >>> (32 - n))) >>> 0;
 const rotr = (x, n) => ((x >>> n) | (x << (32 - n))) >>> 0;
-
 const toHex = (bytes) => Buffer.from(bytes).toString("hex");
-
 const concat = (...parts) =>
   Uint8Array.from(Buffer.concat(parts.map((p) => Buffer.from(p))));
 
-// Padding
 function pad(data, littleEndian) {
   const n = data.length;
-
-  const total =
-    n + 1 + (((55 - n) % 64 + 64) % 64) + 8;
-
+  const total = n + 1 + (((55 - n) % 64) + 64) % 64 + 8;
   const out = new Uint8Array(total);
-
   out.set(data);
   out[n] = 0x80;
-
   new DataView(out.buffer).setBigUint64(
     total - 8,
     BigInt(n) * 8n,
     littleEndian
   );
-
   return out;
 }
 
-// ============================================================================
-// MD5
-// ============================================================================
+// ---------------------------- MD5 ------------------------------------------
 
 const MD5_SHIFT = [
   ...Array(4).fill([7, 12, 17, 22]).flat(),
@@ -63,14 +47,12 @@ const MD5_SHIFT = [
 
 const MD5_K = Array.from(
   { length: 64 },
-  (_, i) =>
-    Math.floor(Math.abs(Math.sin(i + 1)) * 2 ** 32) >>> 0
+  (_, i) => Math.floor(Math.abs(Math.sin(i + 1)) * 2 ** 32) >>> 0
 );
 
 function md5(data) {
   const msg = pad(data, true);
   const view = new DataView(msg.buffer);
-
   const M = new Uint32Array(16);
 
   let a0 = 0x67452301;
@@ -89,8 +71,7 @@ function md5(data) {
     let D = d0;
 
     for (let i = 0; i < 64; i++) {
-      let F;
-      let g;
+      let F, g;
 
       if (i < 16) {
         F = (B & C) | (~B & D);
@@ -111,7 +92,6 @@ function md5(data) {
       A = D;
       D = C;
       C = B;
-
       B = (B + rotl(F, MD5_SHIFT[i])) >>> 0;
     }
 
@@ -130,36 +110,24 @@ function md5(data) {
   return new Uint8Array(out.buffer);
 }
 
-// ============================================================================
-// SHA-256
-// ============================================================================
+// ---------------------------- SHA-256 -------------------------------------
 
 const primes = (n) => {
   const p = [];
-
   for (let x = 2; p.length < n; x++) {
-    if (p.every((q) => x % q)) {
-      p.push(x);
-    }
+    if (p.every((q) => x % q)) p.push(x);
   }
-
   return p;
 };
 
 const icbrt = (n) => {
   let lo = 0n;
-
-  let hi =
-    1n << BigInt(Math.ceil(n.toString(2).length / 3) + 2);
+  let hi = 1n << BigInt(Math.ceil(n.toString(2).length / 3) + 2);
 
   while (lo < hi) {
     const m = (lo + hi + 1n) / 2n;
-
-    if (m ** 3n <= n) {
-      lo = m;
-    } else {
-      hi = m - 1n;
-    }
+    if (m ** 3n <= n) lo = m;
+    else hi = m - 1n;
   }
 
   return lo;
@@ -169,7 +137,6 @@ const isqrt = (n) => {
   let x = BigInt(Math.floor(Math.sqrt(Number(n))));
 
   while (x * x > n) x--;
-
   while ((x + 1n) ** 2n <= n) x++;
 
   return x;
@@ -178,18 +145,15 @@ const isqrt = (n) => {
 const PR = primes(64);
 
 const SHA_H0 = PR.slice(0, 8).map(
-  (p) =>
-    Number(isqrt(BigInt(p) << 64n) & 0xffffffffn)
+  (p) => Number(isqrt(BigInt(p) << 64n) & 0xffffffffn)
 );
 
 const SHA_K = PR.map(
-  (p) =>
-    Number(icbrt(BigInt(p) << 96n) & 0xffffffffn)
+  (p) => Number(icbrt(BigInt(p) << 96n) & 0xffffffffn)
 );
 
 function sha256(data) {
   const msg = pad(data, false);
-
   const view = new DataView(msg.buffer);
 
   const H = Uint32Array.from(SHA_H0);
@@ -211,8 +175,7 @@ function sha256(data) {
         rotr(w[i - 2], 19) ^
         (w[i - 2] >>> 10);
 
-      w[i] =
-        (w[i - 16] + s0 + w[i - 7] + s1) >>> 0;
+      w[i] = (w[i - 16] + s0 + w[i - 7] + s1) >>> 0;
     }
 
     let a = H[0];
@@ -231,18 +194,14 @@ function sha256(data) {
         rotr(e, 25);
 
       const ch = (e & f) ^ (~e & g);
-
-      const t1 =
-        (h + S1 + ch + SHA_K[i] + w[i]) >>> 0;
+      const t1 = (h + S1 + ch + SHA_K[i] + w[i]) >>> 0;
 
       const S0 =
         rotr(a, 2) ^
         rotr(a, 13) ^
         rotr(a, 22);
 
-      const maj =
-        (a & b) ^ (a & c) ^ (b & c);
-
+      const maj = (a & b) ^ (a & c) ^ (b & c);
       const t2 = (S0 + maj) >>> 0;
 
       h = g;
@@ -274,9 +233,7 @@ function sha256(data) {
   return new Uint8Array(out.buffer);
 }
 
-// ============================================================================
-// HMAC-SHA-256
-// ============================================================================
+// ---------------------------- HMAC-SHA-256 -------------------------------
 
 function hmacSha256(key, msg) {
   let k = Uint8Array.from(key);
@@ -286,21 +243,14 @@ function hmacSha256(key, msg) {
   }
 
   const block = new Uint8Array(64);
-
   block.set(k);
 
   const inner = sha256(
-    concat(
-      block.map((b) => b ^ 0x36),
-      msg
-    )
+    concat(block.map((b) => b ^ 0x36), msg)
   );
 
   return sha256(
-    concat(
-      block.map((b) => b ^ 0x5c),
-      inner
-    )
+    concat(block.map((b) => b ^ 0x5c), inner)
   );
 }
 
@@ -309,30 +259,83 @@ const sha256Hex = (d) => toHex(sha256(d));
 
 const sameHex = (a, b) =>
   a.length === b.length &&
-  crypto.timingSafeEqual(
-    Buffer.from(a),
-    Buffer.from(b)
-  );
+  crypto.timingSafeEqual(Buffer.from(a), Buffer.from(b));
 
 // ============================================================================
-// HKDF-SHA-256
+// PART 1B. CANONICAL JSON AND MANIFEST HMAC
+// ============================================================================
+
+function canonicalJson(value) {
+  if (value === null || typeof value !== "object") {
+    return JSON.stringify(value);
+  }
+
+  if (Array.isArray(value)) {
+    return "[" + value.map(canonicalJson).join(",") + "]";
+  }
+
+  return (
+    "{" +
+    Object.keys(value)
+      .sort()
+      .map(
+        (k) =>
+          JSON.stringify(k) + ":" + canonicalJson(value[k])
+      )
+      .join(",") +
+    "}"
+  );
+}
+
+const MANIFEST_MAC_INFO = "vcx-manifest-hmac-sha256-v1";
+
+function manifestMac(master, salt, manifest) {
+  const unsigned = { ...manifest };
+  delete unsigned.manifest_hmac;
+
+  const macKey = hkdf(
+    master,
+    salt,
+    MANIFEST_MAC_INFO,
+    32
+  );
+
+  return toHex(
+    hmacSha256(
+      macKey,
+      Buffer.from(canonicalJson(unsigned), "utf8")
+    )
+  );
+}
+
+function verifyManifestMac(master, salt, manifest) {
+  if (
+    !manifest ||
+    typeof manifest.manifest_hmac !== "string" ||
+    !/^[0-9a-f]{64}$/.test(manifest.manifest_hmac)
+  ) {
+    return false;
+  }
+
+  const expected = manifestMac(master, salt, manifest);
+
+  return sameHex(expected, manifest.manifest_hmac);
+}
+
+// ============================================================================
+// PART 1C. HKDF-SHA-256
 // ============================================================================
 
 function hkdf(master, salt, info, length = 32) {
   const prk = hmacSha256(salt, master);
 
   const blocks = [];
-
   let t = new Uint8Array(0);
 
   for (let i = 1; blocks.length * 32 < length; i++) {
     t = hmacSha256(
       prk,
-      concat(
-        t,
-        Buffer.from(info),
-        Buffer.from([i])
-      )
+      concat(t, Buffer.from(info), Buffer.from([i]))
     );
 
     blocks.push(Buffer.from(t));
@@ -342,11 +345,10 @@ function hkdf(master, salt, info, length = 32) {
 }
 
 // ============================================================================
-// PART 1B. AES-256-GCM
+// PART 2. AES-256-GCM
 // ============================================================================
 
 const MAGIC = Buffer.from("VCX1");
-
 const HEADER_LEN = 4 + 32 + 12;
 const TAG_LEN = 16;
 
@@ -357,11 +359,7 @@ function encryptShare(master, label, plain) {
   const salt = crypto.randomBytes(32);
   const nonce = crypto.randomBytes(12);
 
-  const header = Buffer.concat([
-    MAGIC,
-    salt,
-    nonce
-  ]);
+  const header = Buffer.concat([MAGIC, salt, nonce]);
 
   const c = crypto.createCipheriv(
     "aes-256-gcm",
@@ -369,12 +367,7 @@ function encryptShare(master, label, plain) {
     nonce
   );
 
-  c.setAAD(
-    Buffer.concat([
-      header,
-      Buffer.from(label)
-    ])
-  );
+  c.setAAD(Buffer.concat([header, Buffer.from(label)]));
 
   const ct = Buffer.concat([
     c.update(plain),
@@ -397,7 +390,6 @@ function decryptShare(master, label, blob) {
   }
 
   const header = blob.subarray(0, HEADER_LEN);
-
   const salt = blob.subarray(4, 36);
   const nonce = blob.subarray(36, 48);
 
@@ -409,10 +401,7 @@ function decryptShare(master, label, blob) {
     );
 
     d.setAAD(
-      Buffer.concat([
-        header,
-        Buffer.from(label)
-      ])
+      Buffer.concat([header, Buffer.from(label)])
     );
 
     d.setAuthTag(
@@ -437,24 +426,20 @@ function decryptShare(master, label, blob) {
 }
 
 // ============================================================================
-// PART 2. PNG READ / WRITE
+// PART 3. PNG READING AND WRITING
 // ============================================================================
 
-const CRC_TABLE = Array.from(
-  { length: 256 },
-  (_, n) => {
-    let c = n;
+const CRC_TABLE = Array.from({ length: 256 }, (_, n) => {
+  let c = n;
 
-    for (let k = 0; k < 8; k++) {
-      c =
-        c & 1
-          ? 0xedb88320 ^ (c >>> 1)
-          : c >>> 1;
-    }
-
-    return c >>> 0;
+  for (let k = 0; k < 8; k++) {
+    c = c & 1
+      ? 0xedb88320 ^ (c >>> 1)
+      : c >>> 1;
   }
-);
+
+  return c >>> 0;
+});
 
 const crc32 = (buf) => {
   let c = 0xffffffff;
@@ -468,7 +453,6 @@ const crc32 = (buf) => {
 
 function chunk(type, data) {
   const len = Buffer.alloc(4);
-
   len.writeUInt32BE(data.length);
 
   const td = Buffer.concat([
@@ -477,14 +461,9 @@ function chunk(type, data) {
   ]);
 
   const crc = Buffer.alloc(4);
-
   crc.writeUInt32BE(crc32(td));
 
-  return Buffer.concat([
-    len,
-    td,
-    crc
-  ]);
+  return Buffer.concat([len, td, crc]);
 }
 
 function encodePng(rgb, W, H) {
@@ -495,17 +474,13 @@ function encodePng(rgb, W, H) {
       rgb.buffer,
       rgb.byteOffset + y * W * 3,
       W * 3
-    ).copy(
-      raw,
-      y * (W * 3 + 1) + 1
-    );
+    ).copy(raw, y * (W * 3 + 1) + 1);
   }
 
   const ihdr = Buffer.alloc(13);
 
   ihdr.writeUInt32BE(W, 0);
   ihdr.writeUInt32BE(H, 4);
-
   ihdr[8] = 8;
   ihdr[9] = 2;
 
@@ -519,23 +494,13 @@ function encodePng(rgb, W, H) {
   ]);
 }
 
-// ============================================================================
-// PNG DECODING
-// ============================================================================
-
 function decodePng(buf) {
   if (buf.readUInt32BE(0) !== 0x89504e47) {
     throw new Error("This is not a PNG file");
   }
 
   let pos = 8;
-
-  let W;
-  let H;
-  let depth;
-  let ctype;
-  let interlace;
-
+  let W, H, depth, ctype, interlace;
   let plte = null;
   let trns = null;
 
@@ -543,22 +508,12 @@ function decodePng(buf) {
 
   while (pos < buf.length) {
     const len = buf.readUInt32BE(pos);
-
-    const type = buf.toString(
-      "ascii",
-      pos + 4,
-      pos + 8
-    );
-
-    const data = buf.subarray(
-      pos + 8,
-      pos + 8 + len
-    );
+    const type = buf.toString("ascii", pos + 4, pos + 8);
+    const data = buf.subarray(pos + 8, pos + 8 + len);
 
     if (type === "IHDR") {
       W = data.readUInt32BE(0);
       H = data.readUInt32BE(4);
-
       depth = data[8];
       ctype = data[9];
       interlace = data[12];
@@ -582,7 +537,7 @@ function decodePng(buf) {
     (depth < 8 && ctype !== 0 && ctype !== 3)
   ) {
     throw new Error(
-      `${depth}-bit PNG of this type is not supported.`
+      `${depth}-bit PNG of this type is not supported. Re-save as an 8-bit PNG.`
     );
   }
 
@@ -596,25 +551,16 @@ function decodePng(buf) {
 
   const bps = Math.max(depth, 8) / 8;
   const bpp = ch * bps;
+  const stride = Math.ceil(W * ch * depth / 8);
 
-  const stride = Math.ceil(
-    W * ch * depth / 8
-  );
-
-  const raw = zlib.inflateSync(
-    Buffer.concat(idat)
-  );
-
+  const raw = zlib.inflateSync(Buffer.concat(idat));
   const px = Buffer.alloc(stride * H);
 
-  // Undo PNG filters
   for (let y = 0; y < H; y++) {
     const ft = raw[y * (stride + 1)];
 
     for (let i = 0; i < stride; i++) {
-      const cur = raw[
-        y * (stride + 1) + 1 + i
-      ];
+      const cur = raw[y * (stride + 1) + 1 + i];
 
       const a =
         i >= bpp
@@ -641,7 +587,6 @@ function decodePng(buf) {
         v += (a + b) >> 1;
       } else if (ft === 4) {
         const p = a + b - c;
-
         const pa = Math.abs(p - a);
         const pb = Math.abs(p - b);
         const pc = Math.abs(p - c);
@@ -665,10 +610,7 @@ function decodePng(buf) {
       const i = y * W + x;
       const base = y * stride;
 
-      let r;
-      let g;
-      let b;
-      let a = 255;
+      let r, g, b, a = 255;
 
       if (depth < 8) {
         const bit = x * depth;
@@ -737,34 +679,27 @@ function decodePng(buf) {
 }
 
 // ============================================================================
-// BMP DECODING
+// PART 4. BMP AND IMAGE READING
 // ============================================================================
 
 function decodeBmp(buf) {
   const off = buf.readUInt32LE(10);
   const W = buf.readInt32LE(18);
-
   let H = buf.readInt32LE(22);
 
   const bpp = buf.readUInt16LE(28);
   const comp = buf.readUInt32LE(30);
 
-  if (
-    (bpp !== 24 && bpp !== 32) ||
-    comp !== 0
-  ) {
+  if ((bpp !== 24 && bpp !== 32) || comp !== 0) {
     throw new Error(
-      "This BMP is not a plain 24/32-bit BMP. Save it as PNG."
+      "This BMP is not a plain 24/32-bit BMP. Save it as PNG in Paint."
     );
   }
 
   const topDown = H < 0;
-
   H = Math.abs(H);
 
-  const stride =
-    Math.floor((bpp * W + 31) / 32) * 4;
-
+  const stride = Math.floor((bpp * W + 31) / 32) * 4;
   const px = bpp / 8;
 
   const rgb = new Uint8Array(W * H * 3);
@@ -786,10 +721,6 @@ function decodeBmp(buf) {
   return { rgb, W, H };
 }
 
-// ============================================================================
-// IMAGE DECODING
-// ============================================================================
-
 function decodeImage(buf, name) {
   if (
     buf.length > 8 &&
@@ -798,7 +729,6 @@ function decodeImage(buf, name) {
     return decodePng(buf);
   }
 
-  // JPEG
   if (
     buf.length > 3 &&
     buf[0] === 0xff &&
@@ -811,7 +741,9 @@ function decodeImage(buf, name) {
       jpeg = require("jpeg-js");
     } catch (e) {
       throw new Error(
-        `${name} is a JPG file. Run npm install jpeg-js or convert it to PNG.`
+        `${name} is a JPG file. Fix it in one of two ways:\n` +
+        "1) run: npm install jpeg-js\n" +
+        "2) Open the picture in Paint and save it as PNG."
       );
     }
 
@@ -835,7 +767,6 @@ function decodeImage(buf, name) {
     return { rgb, W, H };
   }
 
-  // BMP
   if (
     buf.length > 30 &&
     buf[0] === 0x42 &&
@@ -845,19 +776,16 @@ function decodeImage(buf, name) {
   }
 
   throw new Error(
-    `${name} is not a PNG, JPG or BMP picture.`
+    `${name} is not a PNG, JPG or BMP picture. Convert it to PNG first.`
   );
 }
 
 // ============================================================================
-// IMAGE RESIZE
+// PART 5. IMAGE RESIZING
 // ============================================================================
 
 function resize(rgb, W, H, maxSide) {
-  if (
-    !maxSide ||
-    Math.max(W, H) <= maxSide
-  ) {
+  if (!maxSide || Math.max(W, H) <= maxSide) {
     return { rgb, W, H };
   }
 
@@ -871,28 +799,24 @@ function resize(rgb, W, H, maxSide) {
   for (let y = 0; y < nh; y++) {
     for (let x = 0; x < nw; x++) {
       const x0 = Math.floor(x / sc);
-
       const x1 = Math.min(
         W,
         Math.max(x0 + 1, Math.ceil((x + 1) / sc))
       );
 
       const y0 = Math.floor(y / sc);
-
       const y1 = Math.min(
         H,
         Math.max(y0 + 1, Math.ceil((y + 1) / sc))
       );
 
       const sum = [0, 0, 0];
-
       let n = 0;
 
       for (let yy = y0; yy < y1; yy++) {
         for (let xx = x0; xx < x1; xx++) {
           for (let c = 0; c < 3; c++) {
-            sum[c] +=
-              rgb[(yy * W + xx) * 3 + c];
+            sum[c] += rgb[(yy * W + xx) * 3 + c];
           }
 
           n++;
@@ -906,15 +830,11 @@ function resize(rgb, W, H, maxSide) {
     }
   }
 
-  return {
-    rgb: out,
-    W: nw,
-    H: nh
-  };
+  return { rgb: out, W: nw, H: nh };
 }
 
 // ============================================================================
-// PART 3. COLOUR VISUAL CRYPTOGRAPHY
+// PART 6. COLOUR VISUAL CRYPTOGRAPHY
 // ============================================================================
 
 const PATTERNS = [
@@ -926,14 +846,15 @@ const PATTERNS = [
   [0, 1, 1, 0]
 ];
 
-// Floyd-Steinberg halftoning
 function halftone(rgb, c, w, h, gamma = 1) {
   const v = new Float32Array(w * h);
   const dark = new Uint8Array(w * h);
 
   for (let i = 0; i < w * h; i++) {
-    v[i] =
-      255 * Math.pow(rgb[i * 3 + c] / 255, gamma);
+    v[i] = 255 * Math.pow(
+      rgb[i * 3 + c] / 255,
+      gamma
+    );
   }
 
   for (let y = 0; y < h; y++) {
@@ -941,9 +862,7 @@ function halftone(rgb, c, w, h, gamma = 1) {
       const i = y * w + x;
 
       const old = v[i];
-
       const nw = old < 128 ? 0 : 255;
-
       const err = old - nw;
 
       dark[i] = nw === 0 ? 1 : 0;
@@ -993,34 +912,23 @@ function visualShares(rgb, w, h, gamma = 1) {
             ? 1 - p[k]
             : p[k];
 
-          s1[idx * 3 + c] =
-            p[k] ? 0 : 255;
-
-          s2[idx * 3 + c] =
-            q ? 0 : 255;
+          s1[idx * 3 + c] = p[k] ? 0 : 255;
+          s2[idx * 3 + c] = q ? 0 : 255;
         }
       }
     }
   }
 
-  return {
-    s1,
-    s2,
-    SW,
-    SH
-  };
+  return { s1, s2, SW, SH };
 }
 
-// Visual stacking
 const visualStack = (a, b) =>
   a.map((v, i) =>
     v === 0 || b[i] === 0 ? 0 : 255
   );
 
-// Visual forging
 function visualForge(s1, fakeRgb, w, h) {
   const SW = w * 2;
-
   const out = new Uint8Array(s1.length);
 
   for (let c = 0; c < 3; c++) {
@@ -1034,8 +942,7 @@ function visualForge(s1, fakeRgb, w, h) {
             2 * x +
             (k & 1);
 
-          const p =
-            s1[idx * 3 + c] === 0 ? 1 : 0;
+          const p = s1[idx * 3 + c] === 0 ? 1 : 0;
 
           out[idx * 3 + c] =
             (dark[y * w + x] ? 1 - p : p)
@@ -1050,12 +957,11 @@ function visualForge(s1, fakeRgb, w, h) {
 }
 
 // ============================================================================
-// XOR SECRET SHARING
+// PART 7. XOR SECRET SHARING
 // ============================================================================
 
 function xorShares(rgb, w, h) {
   const s1 = crypto.randomBytes(rgb.length);
-
   const s2 = new Uint8Array(rgb.length);
 
   for (let i = 0; i < rgb.length; i++) {
@@ -1074,30 +980,18 @@ const xorStack = (a, b) =>
   a.map((v, i) => v ^ b[i]);
 
 const xorForge = (s1, fakeRgb) =>
-  Uint8Array.from(
-    fakeRgb,
-    (v, i) => v ^ s1[i]
-  );
-
-// ============================================================================
-// MODES
-// ============================================================================
+  Uint8Array.from(fakeRgb, (v, i) => v ^ s1[i]);
 
 const MODES = {
   visual: {
     shares: visualShares,
     stack: visualStack,
-
     forge: (s1, fake, w, h) =>
       visualForge(s1, fake, w, h),
-
     tamper: (s) => {
       const t = s.slice();
-
       const i = Math.floor(t.length / 2);
-
       t[i] = t[i] === 0 ? 255 : 0;
-
       return t;
     }
   },
@@ -1105,22 +999,17 @@ const MODES = {
   xor: {
     shares: xorShares,
     stack: xorStack,
-
-    forge: (s1, fake) =>
-      xorForge(s1, fake),
-
+    forge: (s1, fake) => xorForge(s1, fake),
     tamper: (s) => {
       const t = s.slice();
-
       t[Math.floor(t.length / 2)] ^= 1;
-
       return t;
     }
   }
 };
 
 // ============================================================================
-// BUILT-IN DEMO PICTURE
+// PART 8. DEMO IMAGE
 // ============================================================================
 
 function demoPicture(w, h) {
@@ -1148,9 +1037,7 @@ function demoPicture(w, h) {
         c = [255, 225, 60];
       }
 
-      if (
-        y > h * 0.68 + 8 * Math.sin(x / 16)
-      ) {
+      if (y > h * 0.68 + 8 * Math.sin(x / 16)) {
         c = [30, 130, 55];
       }
 
@@ -1170,8 +1057,7 @@ function demoPicture(w, h) {
       if (
         y > h * 0.36 &&
         y <= h * 0.5 &&
-        Math.abs(x - w * 0.28) <
-          (y - h * 0.36) * 1.3
+        Math.abs(x - w * 0.28) < (y - h * 0.36) * 1.3
       ) {
         c = [120, 70, 30];
       }
@@ -1206,17 +1092,15 @@ function fakePicture(w, h) {
 }
 
 // ============================================================================
-// PART A. FLOWCHART FUNCTIONS
+// PART 9. FLOWCHART FUNCTIONS
 // ============================================================================
 
 const CHANNELS = "RGB";
-
 const MAX_PACKAGE = 250 * 1024 * 1024;
 
-// RGB MEAN CALCULATION
+// RGB mean of a share
 function rgbMeans(rgb) {
   const sum = [0, 0, 0];
-
   const n = rgb.length / 3;
 
   for (let i = 0; i < rgb.length; i += 3) {
@@ -1225,20 +1109,20 @@ function rgbMeans(rgb) {
     sum[2] += rgb[i + 2];
   }
 
-  return sum.map(
-    (v) => (v / n).toFixed(4)
-  );
+  return sum.map((v) => (v / n).toFixed(4));
 }
 
-// RANDOM SELECTION
+// Random channel order and random values
 function randomSelection() {
   const order = [0, 1, 2];
 
   for (let i = order.length - 1; i > 0; i--) {
     const j = crypto.randomInt(i + 1);
 
-    [order[i], order[j]] =
-      [order[j], order[i]];
+    [order[i], order[j]] = [
+      order[j],
+      order[i]
+    ];
   }
 
   return {
@@ -1251,7 +1135,7 @@ function randomSelection() {
   };
 }
 
-// DYNAMIC SHA-256 DIGEST
+// Dynamic SHA-256
 function dynamicDigest(means, selection, nonceHex) {
   return sha256Hex(
     Buffer.from(
@@ -1264,7 +1148,7 @@ function dynamicDigest(means, selection, nonceHex) {
   );
 }
 
-// HKDF KEY DERIVATION
+// Derive independent AES keys and nonces
 function deriveKeys(master, salt, digestHex) {
   const okm = hkdf(
     master,
@@ -1281,7 +1165,7 @@ function deriveKeys(master, salt, digestHex) {
   };
 }
 
-// AES-GCM ASSOCIATED DATA
+// AES-GCM associated data
 const shareAad = (name, W, H, n) =>
   Buffer.from(
     JSON.stringify({
@@ -1292,7 +1176,6 @@ const shareAad = (name, W, H, n) =>
     })
   );
 
-// AES ENCRYPTION
 function aesEncrypt(key, nonce, aad, plain) {
   const c = crypto.createCipheriv(
     "aes-256-gcm",
@@ -1313,7 +1196,6 @@ function aesEncrypt(key, nonce, aad, plain) {
   ]);
 }
 
-// AES DECRYPTION
 function aesDecrypt(key, nonce, aad, blob) {
   if (blob.length < 16) {
     throw new Error("encrypted share too short");
@@ -1332,15 +1214,13 @@ function aesDecrypt(key, nonce, aad, blob) {
   );
 
   return Buffer.concat([
-    d.update(
-      blob.subarray(0, blob.length - 16)
-    ),
+    d.update(blob.subarray(0, blob.length - 16)),
     d.final()
   ]);
 }
 
 // ============================================================================
-// MASTER SECRET
+// PART 10. MASTER KEY
 // ============================================================================
 
 function loadMaster(
@@ -1363,10 +1243,7 @@ function loadMaster(
   }
 
   if (fs.existsSync(file)) {
-    const hex = fs.readFileSync(
-      file,
-      "utf8"
-    ).trim();
+    const hex = fs.readFileSync(file, "utf8").trim();
 
     if (!/^[0-9a-fA-F]{64}$/.test(hex)) {
       throw new Error(
@@ -1389,10 +1266,7 @@ function loadMaster(
 
   const master = crypto.randomBytes(32);
 
-  fs.writeFileSync(
-    file,
-    master.toString("hex")
-  );
+  fs.writeFileSync(file, master.toString("hex"));
 
   return {
     master,
@@ -1402,7 +1276,7 @@ function loadMaster(
 }
 
 // ============================================================================
-// ZIP WRITER
+// PART 11. ZIP WRITER
 // ============================================================================
 
 function zipWrite(entries) {
@@ -1414,7 +1288,6 @@ function zipWrite(entries) {
   for (const e of entries) {
     const name = Buffer.from(e.name);
     const data = Buffer.from(e.data);
-
     const crc = crc32(data);
 
     const lh = Buffer.alloc(30);
@@ -1425,11 +1298,9 @@ function zipWrite(entries) {
     lh.writeUInt16LE(0, 8);
     lh.writeUInt16LE(0, 10);
     lh.writeUInt16LE(0x21, 12);
-
     lh.writeUInt32LE(crc, 14);
     lh.writeUInt32LE(data.length, 18);
     lh.writeUInt32LE(data.length, 22);
-
     lh.writeUInt16LE(name.length, 26);
     lh.writeUInt16LE(0, 28);
 
@@ -1442,11 +1313,9 @@ function zipWrite(entries) {
     ch.writeUInt16LE(0, 10);
     ch.writeUInt16LE(0, 12);
     ch.writeUInt16LE(0x21, 14);
-
     ch.writeUInt32LE(crc, 16);
     ch.writeUInt32LE(data.length, 20);
     ch.writeUInt32LE(data.length, 24);
-
     ch.writeUInt16LE(name.length, 28);
     ch.writeUInt32LE(offset, 42);
 
@@ -1457,14 +1326,11 @@ function zipWrite(entries) {
   }
 
   const cd = Buffer.concat(centrals);
-
   const end = Buffer.alloc(22);
 
   end.writeUInt32LE(0x06054b50, 0);
-
   end.writeUInt16LE(entries.length, 8);
   end.writeUInt16LE(entries.length, 10);
-
   end.writeUInt32LE(cd.length, 12);
   end.writeUInt32LE(offset, 16);
 
@@ -1476,12 +1342,23 @@ function zipWrite(entries) {
 }
 
 // ============================================================================
-// ZIP READER
+// PART 12. HARDENED ZIP READER
 // ============================================================================
 
 function zipRead(buf) {
   const bad = (why) =>
     new Error("ZIP package is damaged: " + why);
+
+  if (!Buffer.isBuffer(buf)) {
+    buf = Buffer.from(buf);
+  }
+
+  if (
+    buf.length < 22 ||
+    buf.length > MAX_PACKAGE
+  ) {
+    throw bad("invalid ZIP size");
+  }
 
   let eocd = -1;
 
@@ -1490,36 +1367,65 @@ function zipRead(buf) {
     i >= Math.max(0, buf.length - 22 - 65535);
     i--
   ) {
-    if (
-      buf.readUInt32LE(i) === 0x06054b50
-    ) {
+    if (buf.readUInt32LE(i) === 0x06054b50) {
       eocd = i;
       break;
     }
   }
 
-  if (eocd < 0) {
+  if (eocd < 0 || eocd + 22 > buf.length) {
     throw bad("end record not found");
   }
 
+  if (
+    buf.readUInt16LE(eocd + 4) !== 0 ||
+    buf.readUInt16LE(eocd + 6) !== 0
+  ) {
+    throw bad("multi-disk ZIP is not supported");
+  }
+
+  const diskCount = buf.readUInt16LE(eocd + 8);
   const count = buf.readUInt16LE(eocd + 10);
+  const cdSize = buf.readUInt32LE(eocd + 12);
+  const cdOffset = buf.readUInt32LE(eocd + 16);
+  const commentLen = buf.readUInt16LE(eocd + 20);
 
-  let p = buf.readUInt32LE(eocd + 16);
+  if (
+    diskCount !== count ||
+    count < 1 ||
+    count > 16
+  ) {
+    throw bad("invalid entry count");
+  }
 
-  const files = {};
+  if (eocd + 22 + commentLen !== buf.length) {
+    throw bad("invalid end-record comment length");
+  }
+
+  if (
+    cdOffset + cdSize !== eocd ||
+    cdOffset > buf.length
+  ) {
+    throw bad("central directory bounds are invalid");
+  }
+
+  const files = Object.create(null);
+
+  let p = cdOffset;
+  let total = 0;
 
   for (let k = 0; k < count; k++) {
     if (
-      p + 46 > buf.length ||
+      p + 46 > eocd ||
       buf.readUInt32LE(p) !== 0x02014b50
     ) {
       throw bad("bad directory entry");
     }
 
+    const flags = buf.readUInt16LE(p + 8);
     const method = buf.readUInt16LE(p + 10);
 
     const crc = buf.readUInt32LE(p + 16);
-
     const csize = buf.readUInt32LE(p + 20);
     const usize = buf.readUInt32LE(p + 24);
 
@@ -1527,12 +1433,35 @@ function zipRead(buf) {
     const xlen = buf.readUInt16LE(p + 30);
     const clen = buf.readUInt16LE(p + 32);
 
+    const diskStart = buf.readUInt16LE(p + 34);
     const rel = buf.readUInt32LE(p + 42);
 
-    const name = buf.subarray(
+    const next = p + 46 + nlen + xlen + clen;
+
+    if (
+      next > eocd ||
+      nlen < 1 ||
+      diskStart !== 0 ||
+      (flags & 1) !== 0 ||
+      (flags & 8) !== 0
+    ) {
+      throw bad("unsupported or truncated directory entry");
+    }
+
+    const nameBytes = buf.subarray(
       p + 46,
       p + 46 + nlen
-    ).toString("utf8");
+    );
+
+    const name = nameBytes.toString("utf8");
+
+    if (
+      !/^[A-Za-z0-9_.-]+$/.test(name) ||
+      name.includes("..") ||
+      Object.prototype.hasOwnProperty.call(files, name)
+    ) {
+      throw bad("unsafe or repeated file name");
+    }
 
     if (method !== 0 || csize !== usize) {
       throw bad(
@@ -1540,34 +1469,56 @@ function zipRead(buf) {
       );
     }
 
-    if (
-      !/^[A-Za-z0-9_.-]+$/.test(name) ||
-      name.includes("..") ||
-      name in files
-    ) {
-      throw bad("unsafe or repeated file name");
+    if (total + usize > MAX_PACKAGE) {
+      throw bad("uncompressed data exceeds package limit");
     }
 
     if (
-      rel + 30 > buf.length ||
+      rel + 30 > cdOffset ||
       buf.readUInt32LE(rel) !== 0x04034b50
     ) {
       throw bad("bad local header");
     }
 
-    const start =
-      rel +
-      30 +
-      buf.readUInt16LE(rel + 26) +
-      buf.readUInt16LE(rel + 28);
+    const localFlags = buf.readUInt16LE(rel + 6);
+    const localMethod = buf.readUInt16LE(rel + 8);
 
-    if (start + csize > buf.length) {
-      throw bad("entry runs past the end");
+    const localCrc = buf.readUInt32LE(rel + 14);
+    const localCsize = buf.readUInt32LE(rel + 18);
+    const localUsize = buf.readUInt32LE(rel + 22);
+
+    const localNlen = buf.readUInt16LE(rel + 26);
+    const localXlen = buf.readUInt16LE(rel + 28);
+
+    const localNameStart = rel + 30;
+    const dataStart =
+      localNameStart + localNlen + localXlen;
+
+    if (
+      dataStart + csize > cdOffset ||
+      localFlags !== flags ||
+      localMethod !== method ||
+      localCrc !== crc ||
+      localCsize !== csize ||
+      localUsize !== usize
+    ) {
+      throw bad("local and central headers disagree");
+    }
+
+    if (
+      !buf
+        .subarray(
+          localNameStart,
+          localNameStart + localNlen
+        )
+        .equals(nameBytes)
+    ) {
+      throw bad("local and central filenames disagree");
     }
 
     const data = buf.subarray(
-      start,
-      start + csize
+      dataStart,
+      dataStart + csize
     );
 
     if (crc32(data) !== crc) {
@@ -1576,27 +1527,44 @@ function zipRead(buf) {
 
     files[name] = Buffer.from(data);
 
-    p += 46 + nlen + xlen + clen;
+    total += usize;
+    p = next;
+  }
+
+  if (p !== eocd) {
+    throw bad("central directory size mismatch");
   }
 
   return files;
 }
 
 // ============================================================================
-// TCP READER
+// PART 13. TCP MESSAGE READER
 // ============================================================================
 
 class Reader {
-  constructor(sock) {
+  constructor(sock, maxBuffered = MAX_PACKAGE + 8) {
     this.parts = [];
     this.len = 0;
     this.wake = null;
     this.ended = false;
     this.err = null;
+    this.maxBuffered = maxBuffered;
 
     sock.on("data", (d) => {
-      this.parts.push(d);
       this.len += d.length;
+
+      if (this.len > this.maxBuffered) {
+        this.err = new Error(
+          "incoming TCP buffer exceeded limit"
+        );
+
+        sock.destroy(this.err);
+        this._go();
+        return;
+      }
+
+      this.parts.push(d);
       this._go();
     });
 
@@ -1619,18 +1587,14 @@ class Reader {
   _go() {
     if (this.wake) {
       const w = this.wake;
-
       this.wake = null;
-
       w();
     }
   }
 
   async take(n) {
     while (this.len < n) {
-      if (this.err) {
-        throw this.err;
-      }
+      if (this.err) throw this.err;
 
       if (this.ended) {
         throw new Error(
@@ -1652,7 +1616,6 @@ class Reader {
     const rest = all.subarray(n);
 
     this.parts = rest.length ? [rest] : [];
-
     this.len = rest.length;
 
     return out;
@@ -1661,73 +1624,44 @@ class Reader {
 
 const lengthPrefix = (bytes) => {
   const h = Buffer.alloc(8);
+  h.writeBigUInt64BE(BigInt(bytes.length));
 
-  h.writeBigUInt64BE(
-    BigInt(bytes.length)
-  );
-
-  return Buffer.concat([
-    h,
-    bytes
-  ]);
+  return Buffer.concat([h, bytes]);
 };
 
 // ============================================================================
-// SELF TEST
+// PART 14. SELF-TEST
 // ============================================================================
 
 function selfTest() {
   const sizes = [
-    0,
-    1,
-    55,
-    56,
-    63,
-    64,
-    65,
-    119,
-    120,
-    1000,
-    4096,
-    65537
+    0, 1, 55, 56, 63, 64,
+    65, 119, 120, 1000, 4096, 65537
   ];
 
   for (const n of sizes) {
     const m = crypto.randomBytes(n);
-
-    const k = crypto.randomBytes(
-      n % 90 + 1
-    );
-
-    const salt = crypto.randomBytes(
-      n % 40
-    );
-
+    const k = crypto.randomBytes(n % 90 + 1);
+    const salt = crypto.randomBytes(n % 40);
     const info = "t" + n;
 
     if (
       md5Hex(m) !==
-      crypto.createHash("md5")
-        .update(m)
-        .digest("hex")
+      crypto.createHash("md5").update(m).digest("hex")
     ) {
       throw new Error("MD5 self-test failed");
     }
 
     if (
       sha256Hex(m) !==
-      crypto.createHash("sha256")
-        .update(m)
-        .digest("hex")
+      crypto.createHash("sha256").update(m).digest("hex")
     ) {
       throw new Error("SHA-256 self-test failed");
     }
 
     if (
       toHex(hmacSha256(k, m)) !==
-      crypto.createHmac("sha256", k)
-        .update(m)
-        .digest("hex")
+      crypto.createHmac("sha256", k).update(m).digest("hex")
     ) {
       throw new Error("HMAC self-test failed");
     }
@@ -1753,7 +1687,7 @@ function selfTest() {
 }
 
 // ============================================================================
-// MODULE EXPORTS
+// EXPORTS
 // ============================================================================
 
 module.exports = {
@@ -1773,29 +1707,28 @@ module.exports = {
 
   xorShares,
   xorStack,
-
   demoPicture,
 
   rgbMeans,
   randomSelection,
   dynamicDigest,
-
   deriveKeys,
   shareAad,
-
   aesEncrypt,
   aesDecrypt,
 
   loadMaster,
 
+  canonicalJson,
+  manifestMac,
+  verifyManifestMac,
+
   zipWrite,
   zipRead,
-
   Reader,
   lengthPrefix,
 
   selfTest,
-
   MAX_PACKAGE,
   CHANNELS
 };
