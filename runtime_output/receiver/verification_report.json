@@ -1,0 +1,46 @@
+{
+  "status": "SUCCESS",
+  "checks": {
+    "zip": true,
+    "manifest": true,
+    "digest": true,
+    "aes_gcm_tags": true,
+    "share_mean_verification": true,
+    "sha256": true
+  },
+  "original_filename": "photo.png",
+  "width": 800,
+  "height": 602,
+  "share_means": {
+    "share_1": {
+      "sender": [
+        "127.4000",
+        "127.4075",
+        "127.4720"
+      ],
+      "receiver": [
+        "127.4000",
+        "127.4075",
+        "127.4720"
+      ],
+      "match": true
+    },
+    "share_2": {
+      "sender": [
+        "127.5084",
+        "127.5231",
+        "127.6385"
+      ],
+      "receiver": [
+        "127.5084",
+        "127.5231",
+        "127.6385"
+      ],
+      "match": true
+    }
+  },
+  "original_sha256": "f4183395e65cfcb0ff3048231fac9e9b4378e4a2f8faa9e61de3d1e17deef836",
+  "reconstructed_sha256": "f4183395e65cfcb0ff3048231fac9e9b4378e4a2f8faa9e61de3d1e17deef836",
+  "reconstructed_md5": "432d6649bf2b3acb432484cc0e475a45",
+  "md5_match": true
+}
